@@ -1,6 +1,14 @@
 from pathlib import Path
 from pypdf import PdfReader
 
+import re
+
+# Kopf-/Fußzeilen, die auf jeder Seite wiederholt werden und die Suche verfälschen
+HEADER_PATTERN = re.compile(
+    r"HS Düsseldorf, FB Medien Modulhandbuch B\. Sc\. DAISY Seite \d+ von \d+"
+    r"|S\. \d+ / \d+ HSD"
+)
+
 DATA_DIR = Path("data")
 CHUNK_SIZE = 800   # Zeichen pro Abschnitt
 OVERLAP = 150      # Überlappung zwischen zwei Abschnitten
@@ -11,7 +19,8 @@ def load_pages(pdf_path):
     reader = PdfReader(pdf_path)
     pages = []
     for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
+        text = " ".join((page.extract_text() or "").split())
+        text = HEADER_PATTERN.sub("", text).strip()
         pages.append({"source": pdf_path.name, "page": i + 1, "text": text})
     return pages
 

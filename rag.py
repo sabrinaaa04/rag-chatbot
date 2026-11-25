@@ -3,22 +3,49 @@ import numpy as np
 import faiss
 import ollama
 from build_index import EMBED_MODEL, INDEX_PATH, CHUNKS_PATH
+import re
+from rank_bm25 import BM25Okapi
 
 LLM_MODEL = "llama3.2:3b"
-TOP_K = 4  # Anzahl der Abschnitte, die dem Modell gegeben werden
+TOP_K = 6  # Anzahl der Abschnitte, die dem Modell gegeben werden
 
 index = faiss.read_index(INDEX_PATH)
 with open(CHUNKS_PATH, encoding="utf-8") as f:
     chunks = json.load(f)
 
 
-def search(question, k=TOP_K):
-    """Bettet die Frage ein und sucht die k ähnlichsten Abschnitte."""
+def tokenize(text):
+    """Zerlegt Text in kleingeschriebene Wörter für die Stichwortsuche."""
+    return re.findall(r"\w+", text.lower())
+
+
+bm25 = BM25Okapi([tokenize(c["text"]) for c in chunks])
+
+
+def search(question, k=TOP_K, candidates=20):
+    """Hybrid-Suche: Vektorsuche + BM25, kombiniert per Reciprocal Rank Fusion."""
+    # 1) Bedeutungssuche mit Embeddings
     q = np.array(ollama.embed(model=EMBED_MODEL, input=[question])["embeddings"], dtype="float32")
     faiss.normalize_L2(q)
-    scores, ids = index.search(q, k)
-    return [{**chunks[i], "score": float(s)} for s, i in zip(scores[0], ids[0])]
+    _, vec_ids = index.search(q, candidates)
+    vector_ranking = [int(i) for i in vec_ids[0]]
 
+    # 2) Stichwortsuche mit BM25
+    bm25_scores = bm25.get_scores(tokenize(question))
+    bm25_ranking = [int(i) for i in np.argsort(bm25_scores)[::-1][:candidates]]
+
+        # 3) Abwechselnd je einen Treffer aus beiden Listen nehmen (ohne Doppelte)
+    found = {}  # Abschnitt-Nummer -> womit gefunden
+    for vec_i, bm_i in zip(vector_ranking, bm25_ranking):
+        for i, method in ((vec_i, "Vektor"), (bm_i, "BM25")):
+            if i in found:
+                if found[i] != method:
+                    found[i] = "beide"
+            elif len(found) < k:
+                found[i] = method
+        if len(found) >= k:
+            break
+    return [{**chunks[i], "method": m} for i, m in found.items()]
 
 def ask_llm(prompt):
     """Schickt einen Prompt an das lokale Sprachmodell."""
@@ -65,4 +92,4 @@ if __name__ == "__main__":
         print(answer)
         print("\nGefundene Quellen:")
         for n, h in enumerate(hits, 1):
-            print(f"  [{n}] {h['source']}, S. {h['page']} (Ähnlichkeit {h['score']:.2f})")
+            print(f"  [{n}] {h['source']}, S. {h['page']} (gefunden mit: {h['method']})")
